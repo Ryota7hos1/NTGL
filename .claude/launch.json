@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ntgl",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["/Users/ryotahosokawa/Downloads/NTGL/server/index.js"],
+      "port": 8765
+    }
+  ]
+}
