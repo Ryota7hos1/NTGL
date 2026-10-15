@@ -15,7 +15,7 @@ const SITE=(()=>{
     return {depth:x+y+w/2+d/2+z*0.01,svg:`<g ${extra}><polygon points="${pts(top)}" fill="${color}"/><polygon points="${pts(left)}" fill="${shade(color,.78)}"/><polygon points="${pts(right)}" fill="${shade(color,.62)}"/></g>`,points:[...top,...left,...right]};
   }
 
-  const STATUS_DOT={expired:'#ff8a7a',replace_soon:'#ff8a7a',due_spares_on_hand:'#f0c45a',ok:'#9be08a'};
+  const STATUS_DOT={failed:'#ff5a4a',expired:'#ff8a7a',replace_soon:'#ff8a7a',due_spares_on_hand:'#f0c45a',replacement_ordered:'#9be08a',ok:'#9be08a'};
 
   // Where each piece of equipment sits, and the boxes that draw it. Units are floor tiles.
   const LAYOUT={

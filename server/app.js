@@ -28,13 +28,41 @@ class HttpError extends Error {
 const isoDate = d => d.toISOString().slice(0, 10);
 
 // End of life and replacement status are derived from install date and service life, never stored.
+// A failed part's life ended the day it failed: end_of_life moves to the failure date and
+// days_remaining counts back from it, while rated_end_of_life keeps the date it was rated for.
 function lifecycle(part, now) {
-  const endOfLife = new Date(Date.parse(part.installed_on) + part.service_life_days * DAY);
-  const daysRemaining = Math.ceil((endOfLife - now) / DAY);
-  let status = 'ok';
-  if (daysRemaining < 0) status = 'expired';
-  else if (daysRemaining <= WARN_DAYS) status = part.spares_on_hand >= part.quantity ? 'due_spares_on_hand' : 'replace_soon';
-  return { end_of_life: isoDate(endOfLife), days_remaining: daysRemaining, status };
+  const ratedEnd = new Date(Date.parse(part.installed_on) + part.service_life_days * DAY);
+  if (part.failed_at) {
+    const failed = new Date(part.failed_at);
+    return {
+      end_of_life: isoDate(failed), rated_end_of_life: isoDate(ratedEnd),
+      days_remaining: -Math.floor((now - failed) / DAY) || 0,
+      days_short_of_rating: Math.max(0, Math.ceil((ratedEnd - failed) / DAY)),
+      status: 'failed',
+    };
+  }
+  const daysRemaining = Math.ceil((ratedEnd - now) / DAY);
+  // How long the previous unit lasted is a second trigger for Due: if this one is nearing (or past)
+  // the age the last one failed at, it is due even when its rated end of life is still far off.
+  const previousEnd = part.previous_lifespan_days ? new Date(Date.parse(part.installed_on) + part.previous_lifespan_days * DAY) : null;
+  const daysUntilPrevious = previousEnd && Math.ceil((previousEnd - now) / DAY);
+  const ratedDue = daysRemaining <= WARN_DAYS;
+  const previousDue = previousEnd !== null && daysUntilPrevious <= WARN_DAYS;
+  let status = 'ok', dueReason = null;
+  if (daysRemaining < 0) { status = 'expired'; dueReason = 'rated_end_of_life'; }
+  else if (ratedDue || previousDue) {
+    status = part.spares_on_hand >= part.quantity ? 'due_spares_on_hand' : 'replace_soon';
+    dueReason = previousDue && (!ratedDue || daysUntilPrevious < daysRemaining) ? 'previous_service_life' : 'rated_end_of_life';
+  }
+  // The date the part became due, used to decide which orders resolve it.
+  const dueFrom = dueReason === 'previous_service_life' ? previousEnd : ratedEnd;
+  return {
+    end_of_life: isoDate(ratedEnd), rated_end_of_life: isoDate(ratedEnd), days_remaining: daysRemaining,
+    previous_lifespan_days: part.previous_lifespan_days ?? null,
+    days_until_previous_failure: daysUntilPrevious ?? null,
+    due_reason: dueReason, due_window_start: isoDate(new Date(dueFrom - WARN_DAYS * DAY)),
+    status,
+  };
 }
 
 function createApp({ db, now = () => new Date() }) {
@@ -46,7 +74,7 @@ function createApp({ db, now = () => new Date() }) {
     equipment: db.prepare('SELECT * FROM equipment ORDER BY id'),
     part: db.prepare('SELECT * FROM parts WHERE id = ?'),
     openRequest: db.prepare(`SELECT id, status FROM supplier_requests WHERE part_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1`),
-    lastOrder: db.prepare(`SELECT id, status FROM supplier_requests WHERE part_id = ? AND status IN ('ordered','purchased') ORDER BY id DESC LIMIT 1`),
+    lastOrder: db.prepare(`SELECT id, status, created_at FROM supplier_requests WHERE part_id = ? AND status IN ('ordered','purchased') ORDER BY id DESC LIMIT 1`),
     lastPurchase: db.prepare('SELECT supplier, unit_price_gbp, quantity, purchased_on FROM purchase_history WHERE part_id = ? ORDER BY purchased_on DESC, id DESC LIMIT 1'),
     insertPurchase: db.prepare('INSERT INTO purchase_history (part_id, supplier, unit_price_gbp, quantity, purchased_on) VALUES (?, ?, ?, ?, ?)'),
     request: db.prepare('SELECT * FROM supplier_requests WHERE id = ?'),
@@ -58,7 +86,8 @@ function createApp({ db, now = () => new Date() }) {
     insertOrder: db.prepare(`INSERT INTO orders (request_id, quote_id, quantity, total_gbp, delivery_site, po_reference, notes, expected_delivery, placed_by, placed_at)
                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     audit: db.prepare('SELECT action, actor, detail, at FROM audit_log WHERE request_id = ? ORDER BY id'),
-    log: db.prepare('INSERT INTO audit_log (request_id, action, actor, detail, at) VALUES (?, ?, ?, ?, ?)'),
+    log: db.prepare('INSERT INTO audit_log (part_id, request_id, action, actor, detail, at) VALUES (?, ?, ?, ?, ?, ?)'),
+    failPart: db.prepare('UPDATE parts SET failed_at = ? WHERE id = ?'),
     // Orders placed here plus requests closed as bought elsewhere, newest first.
     allOrders: db.prepare(`
       SELECT r.id AS request_id, 'ordered' AS source, o.id AS order_id, p.name AS part, p.equipment_id, o.quantity,
@@ -72,7 +101,7 @@ function createApp({ db, now = () => new Date() }) {
       ORDER BY at DESC, request_id DESC`),
     allAudit: db.prepare(`
       SELECT a.id, a.request_id, a.action, a.actor, a.detail, a.at, p.name AS part, p.equipment_id
-        FROM audit_log a JOIN supplier_requests r ON r.id = a.request_id JOIN parts p ON p.id = r.part_id
+        FROM audit_log a JOIN parts p ON p.id = a.part_id
        ORDER BY a.id DESC`),
   };
 
@@ -119,20 +148,38 @@ function createApp({ db, now = () => new Date() }) {
     };
   };
 
+  // A due part counts as resolved once a replacement was ordered (or bought elsewhere) inside its
+  // current warning window; `lifecycle_status` keeps the raw end-of-life status.
+  const partState = p => {
+    const life = lifecycle(p, now());
+    const lastOrder = q.lastOrder.get(p.id) ?? null;
+    // A failure starts a new window: only orders made after the part broke resolve it.
+    const windowStart = p.failed_at ? Date.parse(p.failed_at) : Date.parse(life.due_window_start);
+    const resolved = life.status !== 'ok' && lastOrder && Date.parse(lastOrder.created_at) >= windowStart;
+    return {
+      ...p, ...life, lifecycle_status: life.status,
+      status: resolved ? 'replacement_ordered' : life.status,
+      open_request: q.openRequest.get(p.id) ?? null,
+      last_order: lastOrder && { id: lastOrder.id, status: lastOrder.status },
+    };
+  };
+
   app.get('/api/parts', (req, res) => {
-    res.json(q.parts.all().map(p => ({ ...p, ...lifecycle(p, now()), open_request: q.openRequest.get(p.id) ?? null, last_order: q.lastOrder.get(p.id) ?? null })));
+    res.json(q.parts.all().map(partState));
   });
 
   app.post('/api/parts/:id/requests', (req, res) => {
     const actor = requireActor(req.body);
     const part = q.part.get(Number(req.params.id));
     if (!part) throw new HttpError(404, 'part not found');
-    const { status } = lifecycle(part, now());
+    const { status, due_reason: dueReason } = lifecycle(part, now());
     if (q.openRequest.get(part.id)) throw new HttpError(409, 'part already has an open request');
 
     const id = transaction(() => {
-      const scope = status === 'replace_soon' || status === 'expired'
-        ? `Replace ${part.quantity} × ${part.name} on ${part.equipment_id} before end of service life.`
+      const what = `${part.quantity} × ${part.name} on ${part.equipment_id}`;
+      const scope = status === 'failed' ? `Replace failed ${what}.`
+        : dueReason === 'previous_service_life' ? `Replace ${what} before it reaches the age the previous unit failed at (${part.previous_lifespan_days} days).`
+        : dueReason ? `Replace ${what} before end of service life.`
         : `Order ${part.quantity} × ${part.name} for ${part.equipment_id}.`;
       const evidence = JSON.stringify(EVIDENCE[part.equipment_id] ?? []);
       const { lastInsertRowid } = q.insertRequest.run(part.id, scope, evidence, now().toISOString());
@@ -140,16 +187,21 @@ function createApp({ db, now = () => new Date() }) {
       for (const t of QUOTE_TEMPLATES) {
         q.insertQuote.run(lastInsertRowid, t.supplier, t.included, t.excluded, t.lead_time_days, Math.round(base * t.factor / 5) * 5 || 1);
       }
-      q.log.run(lastInsertRowid, 'quotes requested', actor, `${QUOTE_TEMPLATES.length} suppliers`, now().toISOString());
+      q.log.run(part.id, lastInsertRowid, 'quotes requested', actor, `${QUOTE_TEMPLATES.length} suppliers`, now().toISOString());
       return lastInsertRowid;
     });
     res.status(201).json(requestView(loadRequest(id)));
   });
 
   // Equipment with its parts and the most urgent part status, for the site view.
-  const URGENCY = ['ok', 'due_spares_on_hand', 'replace_soon', 'expired'];
+  const URGENCY = ['ok', 'replacement_ordered', 'due_spares_on_hand', 'replace_soon', 'expired', 'failed'];
   app.get('/api/equipment', (req, res) => {
-    const parts = q.parts.all().map(p => ({ id: p.id, name: p.name, quantity: p.quantity, equipment_id: p.equipment_id, ...lifecycle(p, now()) }));
+    const parts = q.parts.all().map(p => {
+      const { id, name, quantity, equipment_id, end_of_life, rated_end_of_life, days_remaining, days_short_of_rating,
+        previous_lifespan_days, days_until_previous_failure, due_reason, status } = partState(p);
+      return { id, name, quantity, equipment_id, end_of_life, rated_end_of_life, days_remaining, days_short_of_rating,
+        previous_lifespan_days, days_until_previous_failure, due_reason, status };
+    });
     res.json(q.equipment.all().map(e => {
       const own = parts.filter(p => p.equipment_id === e.id);
       const status = own.reduce((worst, p) => URGENCY.indexOf(p.status) > URGENCY.indexOf(worst) ? p.status : worst, 'ok');
@@ -183,7 +235,7 @@ function createApp({ db, now = () => new Date() }) {
         quote.expected_delivery, actor, now().toISOString());
       q.setStatus.run('ordered', request.id);
       q.insertPurchase.run(request.part_id, quote.supplier, quote.unit_price_gbp, quote.quantity, isoDate(now()));
-      q.log.run(request.id, 'order placed', actor, `${quote.supplier}, £${quote.total_gbp.toLocaleString('en-GB')}`, now().toISOString());
+      q.log.run(request.part_id, request.id, 'order placed', actor, `${quote.supplier}, £${quote.total_gbp.toLocaleString('en-GB')}`, now().toISOString());
     });
     res.status(201).json(requestView(loadRequest(request.id)));
   });
@@ -195,7 +247,7 @@ function createApp({ db, now = () => new Date() }) {
     if (request.status !== 'open') throw new HttpError(409, `cannot mark a request that is ${request.status} as purchased`);
     transaction(() => {
       q.setStatus.run('purchased', request.id);
-      q.log.run(request.id, 'marked already purchased', actor, null, now().toISOString());
+      q.log.run(request.part_id, request.id, 'marked already purchased', actor, null, now().toISOString());
     });
     res.json(requestView(loadRequest(request.id)));
   });
@@ -206,9 +258,22 @@ function createApp({ db, now = () => new Date() }) {
     if (request.status !== 'open') throw new HttpError(409, `cannot cancel a request that is ${request.status}`);
     transaction(() => {
       q.setStatus.run('cancelled', request.id);
-      q.log.run(request.id, 'cancelled', actor, null, now().toISOString());
+      q.log.run(request.part_id, request.id, 'cancelled', actor, null, now().toISOString());
     });
     res.json(requestView(loadRequest(request.id)));
+  });
+
+  // Demo only: break a part so the replacement flow can be shown on demand.
+  app.post('/api/parts/:id/destroy', (req, res) => {
+    const actor = requireActor(req.body);
+    const part = q.part.get(Number(req.params.id));
+    if (!part) throw new HttpError(404, 'part not found');
+    if (part.failed_at) throw new HttpError(409, 'part has already failed');
+    transaction(() => {
+      q.failPart.run(now().toISOString(), part.id);
+      q.log.run(part.id, null, 'destroyed (demo)', actor, `${part.name} on ${part.equipment_id} failed`, now().toISOString());
+    });
+    res.json(partState(q.part.get(part.id)));
   });
 
   // Lets reviewers replay the demo from a clean state.

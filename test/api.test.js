@@ -23,6 +23,25 @@ const api = async (method, path, body) => {
 };
 const batteries = async () => (await api('GET', '/api/parts')).body.find(p => p.equipment_id === 'BS-A1');
 
+test('previous lifespan triggers Due before the rated end of life, with a reason', () => {
+  const now = new Date('2026-01-01T00:00:00Z');
+  const part = { installed_on: '2024-01-01', service_life_days: 1500, quantity: 1, spares_on_hand: 0 };
+  assert.equal(lifecycle(part, now).status, 'ok');
+  assert.equal(lifecycle(part, now).days_until_previous_failure, null);
+
+  const nearing = lifecycle({ ...part, previous_lifespan_days: 760 }, now);
+  assert.equal(nearing.days_until_previous_failure, 29);
+  assert.equal(nearing.status, 'replace_soon');
+  assert.equal(nearing.due_reason, 'previous_service_life');
+
+  const farOff = lifecycle({ ...part, previous_lifespan_days: 1200 }, now);
+  assert.equal(farOff.status, 'ok', 'history far in the future only informs');
+  assert.equal(farOff.due_reason, null);
+
+  const ratedSooner = lifecycle({ ...part, service_life_days: 750, previous_lifespan_days: 760 }, now);
+  assert.equal(ratedSooner.due_reason, 'rated_end_of_life', 'the sooner trigger is the reason');
+});
+
 test('lifecycle derives status from install date, service life and spares', () => {
   const now = new Date('2026-01-01T00:00:00Z');
   const part = { installed_on: '2025-01-01', service_life_days: 400, quantity: 4, spares_on_hand: 0 };
@@ -35,7 +54,7 @@ test('lifecycle derives status from install date, service life and spares', () =
 
 test('seeded parts expose computed lifecycle fields', async () => {
   const { body } = await api('GET', '/api/parts');
-  assert.deepEqual(body.map(p => p.status), ['replace_soon', 'ok', 'due_spares_on_hand', 'ok', 'replace_soon', 'ok']);
+  assert.deepEqual(body.map(p => p.status), ['replace_soon', 'due_spares_on_hand', 'due_spares_on_hand', 'ok', 'replace_soon', 'ok']);
   assert.equal(body[0].days_remaining, 62);
 });
 
@@ -83,7 +102,7 @@ test('any part can be ordered, including ones not yet due', async () => {
   const ok = body.find(p => p.status === 'ok');
   const created = await api('POST', `/api/parts/${ok.id}/requests`, { actor: 'R' });
   assert.equal(created.status, 201);
-  assert.match(created.body.scope, /^Order 1 × Fan kit F-210/);
+  assert.match(created.body.scope, /^Order 6 × DC capacitor bank/);
 });
 
 test('cancelling frees the part for a new request; reset restores seed data', async () => {
@@ -163,4 +182,71 @@ test('equipment groups its parts and reports the most urgent status', async () =
   assert.equal(byId['CRAH-3'].status, 'due_spares_on_hand');
   assert.equal(byId['UPS-A'].status, 'ok');
   assert.deepEqual(byId['GEN-1'].parts.map(p => p.name), ['Starter batteries 24V', 'Fuel filters']);
+});
+
+test('ordering or buying a due part resolves it; ok parts keep their status', async () => {
+  const part = await batteries();
+  const { body: request } = await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R' });
+  assert.equal((await batteries()).status, 'replace_soon', 'requesting quotes alone does not resolve it');
+
+  await api('POST', `/api/requests/${request.id}/orders`, { actor: 'R', quote_id: request.quotes[0].id });
+  const after = await batteries();
+  assert.equal(after.status, 'replacement_ordered');
+  assert.equal(after.lifecycle_status, 'replace_soon');
+  assert.equal(after.last_order.status, 'ordered');
+
+  const { body: equipment } = await api('GET', '/api/equipment');
+  assert.equal(equipment.find(e => e.id === 'BS-A1').status, 'replacement_ordered');
+
+  const { body: parts } = await api('GET', '/api/parts');
+  const starter = parts.find(p => p.name === 'Starter batteries 24V');
+  const { body: starterRequest } = await api('POST', `/api/parts/${starter.id}/requests`, { actor: 'R' });
+  await api('POST', `/api/requests/${starterRequest.id}/already-purchased`, { actor: 'R' });
+  assert.equal((await api('GET', '/api/parts')).body.find(p => p.id === starter.id).status, 'replacement_ordered');
+
+  const healthy = parts.find(p => p.status === 'ok');
+  const { body: healthyRequest } = await api('POST', `/api/parts/${healthy.id}/requests`, { actor: 'R' });
+  await api('POST', `/api/requests/${healthyRequest.id}/orders`, { actor: 'R', quote_id: healthyRequest.quotes[0].id });
+  assert.equal((await api('GET', '/api/parts')).body.find(p => p.id === healthy.id).status, 'ok');
+});
+
+test('destroying a part marks it failed until a replacement is ordered', async () => {
+  const { body: parts } = await api('GET', '/api/parts');
+  const fan = parts.find(p => p.name === 'Fan kit F-210');
+  assert.equal((await api('POST', `/api/parts/${fan.id}/destroy`, {})).status, 400, 'needs an actor');
+
+  const destroyed = await api('POST', `/api/parts/${fan.id}/destroy`, { actor: 'R' });
+  assert.equal(destroyed.body.status, 'failed');
+  assert.equal(destroyed.body.end_of_life, new Date().toISOString().slice(0, 10), 'end of life moves to the failure date');
+  assert.equal(destroyed.body.days_remaining, 0);
+  assert.equal(destroyed.body.rated_end_of_life, fan.end_of_life, 'rated end of life is kept');
+  assert.equal(destroyed.body.days_short_of_rating, fan.days_remaining);
+  assert.equal((await api('POST', `/api/parts/${fan.id}/destroy`, { actor: 'R' })).status, 409, 'cannot destroy twice');
+
+  const { body: equipment } = await api('GET', '/api/equipment');
+  assert.equal(equipment.find(e => e.id === 'CRAH-3').status, 'failed');
+  const { body: audit } = await api('GET', '/api/audit');
+  assert.deepEqual([audit[0].action, audit[0].part, audit[0].request_id], ['destroyed (demo)', 'Fan kit F-210', null]);
+
+  const { body: request } = await api('POST', `/api/parts/${fan.id}/requests`, { actor: 'R' });
+  assert.match(request.scope, /^Replace failed 1 × Fan kit F-210/);
+  await api('POST', `/api/requests/${request.id}/orders`, { actor: 'R', quote_id: request.quotes[0].id });
+  assert.equal((await api('GET', '/api/parts')).body.find(p => p.id === fan.id).status, 'replacement_ordered');
+
+  await api('POST', '/api/demo/reset');
+  assert.equal((await api('GET', '/api/parts')).body.find(p => p.name === 'Fan kit F-210').status, fan.status, 'reset restores it');
+});
+
+test('seeded fan kit is due because it is nearing the age the last one failed at', async () => {
+  const { body } = await api('GET', '/api/parts');
+  const fan = body.find(p => p.name === 'Fan kit F-210');
+  assert.equal(fan.status, 'due_spares_on_hand');
+  assert.equal(fan.due_reason, 'previous_service_life');
+  assert.equal(fan.days_until_previous_failure, 30);
+  const { body: request } = await api('POST', `/api/parts/${fan.id}/requests`, { actor: 'R' });
+  assert.match(request.scope, /age the previous unit failed at \(700 days\)/);
+
+  const ups = body.find(p => p.name === 'DC capacitor bank');
+  assert.equal(ups.status, 'ok');
+  assert.equal(ups.days_until_previous_failure, 445);
 });
