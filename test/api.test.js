@@ -39,45 +39,51 @@ test('seeded parts expose computed lifecycle fields', async () => {
   assert.equal(body[0].days_remaining, 62);
 });
 
-test('full flow: draft, send, award, with audit trail', async () => {
+test('full flow: request quotes, then place an order, with audit trail', async () => {
   const part = await batteries();
-  const draft = await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R. Hosokawa' });
-  assert.equal(draft.status, 201);
-  assert.equal(draft.body.status, 'draft');
-  assert.deepEqual(draft.body.bids, []);
+  const created = await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R. Hosokawa' });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.status, 'open');
+  assert.equal(created.body.quotes.length, 3);
+  const quote = created.body.quotes[1];
+  assert.equal(quote.total_gbp, quote.unit_price_gbp * part.quantity);
+  assert.equal((await batteries()).open_request.status, 'open');
 
-  const sent = await api('POST', `/api/requests/${draft.body.id}/send`, { actor: 'A. Engineer' });
-  assert.equal(sent.body.status, 'sent');
-  assert.equal(sent.body.bids.length, 3);
-
-  const bid = sent.body.bids[1];
-  const awarded = await api('POST', `/api/requests/${draft.body.id}/award`, { actor: 'A. Engineer', bid_id: bid.id });
-  assert.equal(awarded.body.status, 'awarded');
-  assert.equal(awarded.body.bids.find(b => b.awarded).id, bid.id);
-  assert.deepEqual(awarded.body.audit.map(a => [a.action, a.actor]), [
-    ['drafted', 'R. Hosokawa'],
-    ['approved and sent', 'A. Engineer'],
-    ['awarded', 'A. Engineer'],
+  const ordered = await api('POST', `/api/requests/${created.body.id}/orders`,
+    { actor: 'A. Engineer', quote_id: quote.id, po_reference: 'PO-123', notes: ' weekday delivery ' });
+  assert.equal(ordered.status, 201);
+  assert.equal(ordered.body.status, 'ordered');
+  assert.equal(ordered.body.order.quote_id, quote.id);
+  assert.equal(ordered.body.order.total_gbp, quote.total_gbp);
+  assert.equal(ordered.body.order.expected_delivery, quote.expected_delivery);
+  assert.equal(ordered.body.order.delivery_site, 'Demo Site LHR-1, Hall A');
+  assert.equal(ordered.body.order.notes, 'weekday delivery');
+  assert.deepEqual(ordered.body.audit.map(a => [a.action, a.actor]), [
+    ['quotes requested', 'R. Hosokawa'],
+    ['order placed', 'A. Engineer'],
   ]);
 });
 
-test('rejects invalid transitions and missing actor', async () => {
+test('rejects invalid orders and missing actor', async () => {
   const part = await batteries();
   assert.equal((await api('POST', `/api/parts/${part.id}/requests`, {})).status, 400);
 
-  const { body: draft } = await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R' });
+  const { body: request } = await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R' });
   assert.equal((await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R' })).status, 409, 'one open request per part');
-  assert.equal((await api('POST', `/api/requests/${draft.id}/award`, { actor: 'R', bid_id: 1 })).status, 409, 'cannot award a draft');
+  assert.equal((await api('POST', `/api/requests/${request.id}/orders`, { actor: 'R', quote_id: 9999 })).status, 400);
+  assert.equal((await api('POST', `/api/requests/${request.id}/orders`, { quote_id: request.quotes[0].id })).status, 400);
 
-  await api('POST', `/api/requests/${draft.id}/send`, { actor: 'R' });
-  assert.equal((await api('POST', `/api/requests/${draft.id}/send`, { actor: 'R' })).status, 409, 'cannot send twice');
-  assert.equal((await api('POST', `/api/requests/${draft.id}/award`, { actor: 'R', bid_id: 9999 })).status, 400);
+  await api('POST', `/api/requests/${request.id}/orders`, { actor: 'R', quote_id: request.quotes[0].id });
+  assert.equal((await api('POST', `/api/requests/${request.id}/orders`, { actor: 'R', quote_id: request.quotes[0].id })).status, 409, 'cannot order twice');
+  assert.equal((await api('POST', `/api/requests/${request.id}/cancel`, { actor: 'R' })).status, 409, 'cannot cancel after ordering');
 });
 
-test('parts that do not need replacing cannot get a request', async () => {
+test('any part can be ordered, including ones not yet due', async () => {
   const { body } = await api('GET', '/api/parts');
   const ok = body.find(p => p.status === 'ok');
-  assert.equal((await api('POST', `/api/parts/${ok.id}/requests`, { actor: 'R' })).status, 409);
+  const created = await api('POST', `/api/parts/${ok.id}/requests`, { actor: 'R' });
+  assert.equal(created.status, 201);
+  assert.match(created.body.scope, /^Order 1 × Fan kit F-210/);
 });
 
 test('cancelling frees the part for a new request; reset restores seed data', async () => {
@@ -90,4 +96,35 @@ test('cancelling frees the part for a new request; reset restores seed data', as
   assert.equal((await api('POST', '/api/demo/reset')).status, 204);
   assert.equal((await batteries()).open_request, null);
   assert.equal((await api('GET', `/api/requests/${draft.id}`)).status, 404);
+});
+
+test('quotes show the last purchase price and flag the previous supplier', async () => {
+  const part = await batteries();
+  const { body: request } = await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R' });
+  assert.equal(request.last_purchase.supplier, 'Volta Critical Supply');
+  assert.equal(request.last_purchase.unit_price_gbp, 165);
+  assert.deepEqual(request.quotes.filter(x => x.previous_supplier).map(x => x.supplier), ['Volta Critical Supply']);
+  const volta = request.quotes.find(x => x.previous_supplier);
+  assert.equal(volta.change_vs_last_gbp, volta.unit_price_gbp - 165);
+
+  // An order becomes the new last purchase for the part.
+  const cellstock = request.quotes.find(x => x.supplier === 'Cellstock Direct');
+  await api('POST', `/api/requests/${request.id}/orders`, { actor: 'R', quote_id: cellstock.id });
+  const { body: after } = await api('GET', `/api/requests/${request.id}`);
+  assert.equal(after.last_purchase.supplier, 'Cellstock Direct');
+  assert.equal(after.last_purchase.unit_price_gbp, cellstock.unit_price_gbp);
+});
+
+test('already purchased closes the request so it cannot be ordered', async () => {
+  const part = await batteries();
+  const { body: request } = await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R' });
+  assert.equal((await api('POST', `/api/requests/${request.id}/already-purchased`, {})).status, 400);
+
+  const marked = await api('POST', `/api/requests/${request.id}/already-purchased`, { actor: 'R' });
+  assert.equal(marked.body.status, 'purchased');
+  assert.equal(marked.body.audit.at(-1).action, 'marked already purchased');
+  assert.equal((await batteries()).open_request, null);
+  assert.equal((await batteries()).last_order.status, 'purchased');
+  assert.equal((await api('POST', `/api/requests/${request.id}/orders`, { actor: 'R', quote_id: request.quotes[0].id })).status, 409);
+  assert.equal((await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R' })).status, 201, 'can order the part again later');
 });

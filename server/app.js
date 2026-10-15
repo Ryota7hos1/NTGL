@@ -4,6 +4,7 @@ const { reset } = require('./db');
 
 const DAY = 86400000;
 const WARN_DAYS = 90;
+const DEFAULT_SITE = 'Demo Site LHR-1, Hall A';
 
 // Site documents cited as evidence on a request, by equipment.
 const EVIDENCE = {
@@ -11,16 +12,20 @@ const EVIDENCE = {
   'CRAH-3': ['CRAH-3 O&M manual rev 1'],
 };
 
-// Simulated supplier responses, created when a request is sent. Prices are illustrative.
-const BID_TEMPLATES = [
-  { supplier: 'Supplier A', included: 'Supply, install, disposal', excluded: 'Load bank test', lead_time_days: 21, unit: 210 },
-  { supplier: 'Supplier B', included: 'Supply, install', excluded: 'Disposal, testing', lead_time_days: 14, unit: 180 },
-  { supplier: 'Supplier C', included: 'Supply only', excluded: 'Install, disposal', lead_time_days: 5, unit: 140 },
+// Simulated supplier quotes, created with each request. Suppliers are fictional; each unit price
+// is the part's last purchase price scaled by a per-supplier factor.
+const QUOTE_TEMPLATES = [
+  { supplier: 'Northbank Power Services', included: 'Supply, install, disposal', excluded: 'Load bank test', lead_time_days: 21, factor: 1.27 },
+  { supplier: 'Volta Critical Supply', included: 'Supply, install', excluded: 'Disposal, testing', lead_time_days: 14, factor: 1.09 },
+  { supplier: 'Cellstock Direct', included: 'Supply only', excluded: 'Install, disposal', lead_time_days: 5, factor: 0.85 },
 ];
+const FALLBACK_UNIT_PRICE = 100;
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
+
+const isoDate = d => d.toISOString().slice(0, 10);
 
 // End of life and replacement status are derived from install date and service life, never stored.
 function lifecycle(part, now) {
@@ -29,7 +34,7 @@ function lifecycle(part, now) {
   let status = 'ok';
   if (daysRemaining < 0) status = 'expired';
   else if (daysRemaining <= WARN_DAYS) status = part.spares_on_hand >= part.quantity ? 'due_spares_on_hand' : 'replace_soon';
-  return { end_of_life: endOfLife.toISOString().slice(0, 10), days_remaining: daysRemaining, status };
+  return { end_of_life: isoDate(endOfLife), days_remaining: daysRemaining, status };
 }
 
 function createApp({ db, now = () => new Date() }) {
@@ -39,13 +44,18 @@ function createApp({ db, now = () => new Date() }) {
   const q = {
     parts: db.prepare('SELECT * FROM parts ORDER BY id'),
     part: db.prepare('SELECT * FROM parts WHERE id = ?'),
-    openRequest: db.prepare(`SELECT id, status FROM supplier_requests WHERE part_id = ? AND status IN ('draft','sent','awarded') ORDER BY id DESC LIMIT 1`),
+    openRequest: db.prepare(`SELECT id, status FROM supplier_requests WHERE part_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1`),
+    lastOrder: db.prepare(`SELECT id, status FROM supplier_requests WHERE part_id = ? AND status IN ('ordered','purchased') ORDER BY id DESC LIMIT 1`),
+    lastPurchase: db.prepare('SELECT supplier, unit_price_gbp, quantity, purchased_on FROM purchase_history WHERE part_id = ? ORDER BY purchased_on DESC, id DESC LIMIT 1'),
+    insertPurchase: db.prepare('INSERT INTO purchase_history (part_id, supplier, unit_price_gbp, quantity, purchased_on) VALUES (?, ?, ?, ?, ?)'),
     request: db.prepare('SELECT * FROM supplier_requests WHERE id = ?'),
-    insertRequest: db.prepare(`INSERT INTO supplier_requests (part_id, scope, evidence, status, created_at) VALUES (?, ?, ?, 'draft', ?)`),
+    insertRequest: db.prepare(`INSERT INTO supplier_requests (part_id, scope, evidence, status, created_at) VALUES (?, ?, ?, 'open', ?)`),
     setStatus: db.prepare('UPDATE supplier_requests SET status = ? WHERE id = ?'),
-    bids: db.prepare('SELECT * FROM bids WHERE request_id = ? ORDER BY id'),
-    insertBid: db.prepare('INSERT INTO bids (request_id, supplier, included, excluded, lead_time_days, price_gbp) VALUES (?, ?, ?, ?, ?, ?)'),
-    awardBid: db.prepare('UPDATE bids SET awarded = 1 WHERE id = ? AND request_id = ?'),
+    quotes: db.prepare('SELECT * FROM quotes WHERE request_id = ? ORDER BY id'),
+    insertQuote: db.prepare('INSERT INTO quotes (request_id, supplier, included, excluded, lead_time_days, unit_price_gbp) VALUES (?, ?, ?, ?, ?, ?)'),
+    order: db.prepare('SELECT * FROM orders WHERE request_id = ?'),
+    insertOrder: db.prepare(`INSERT INTO orders (request_id, quote_id, quantity, total_gbp, delivery_site, po_reference, notes, expected_delivery, placed_by, placed_at)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     audit: db.prepare('SELECT action, actor, detail, at FROM audit_log WHERE request_id = ? ORDER BY id'),
     log: db.prepare('INSERT INTO audit_log (request_id, action, actor, detail, at) VALUES (?, ?, ?, ?, ?)'),
   };
@@ -56,8 +66,10 @@ function createApp({ db, now = () => new Date() }) {
     catch (err) { db.exec('ROLLBACK'); throw err; }
   };
 
+  const text = (body, key) => typeof body?.[key] === 'string' ? body[key].trim() : '';
+
   const requireActor = body => {
-    const actor = typeof body?.actor === 'string' ? body.actor.trim() : '';
+    const actor = text(body, 'actor');
     if (!actor) throw new HttpError(400, 'enter your name: every change is recorded against the engineer who made it (actor)');
     return actor;
   };
@@ -70,17 +82,29 @@ function createApp({ db, now = () => new Date() }) {
 
   const requestView = request => {
     const part = q.part.get(request.part_id);
+    const at = now();
+    const lastPurchase = q.lastPurchase.get(part.id) ?? null;
+    const quotes = q.quotes.all(request.id).map(quote => ({
+      ...quote,
+      previous_supplier: quote.supplier === lastPurchase?.supplier,
+      change_vs_last_gbp: lastPurchase ? quote.unit_price_gbp - lastPurchase.unit_price_gbp : null,
+      quantity: part.quantity,
+      total_gbp: quote.unit_price_gbp * part.quantity,
+      expected_delivery: isoDate(new Date(at.getTime() + quote.lead_time_days * DAY)),
+    }));
     return {
       ...request,
       evidence: JSON.parse(request.evidence),
-      part: { ...part, ...lifecycle(part, now()) },
-      bids: q.bids.all(request.id).map(b => ({ ...b, awarded: Boolean(b.awarded) })),
+      part: { ...part, ...lifecycle(part, at) },
+      quotes,
+      last_purchase: lastPurchase,
+      order: q.order.get(request.id) ?? null,
       audit: q.audit.all(request.id),
     };
   };
 
   app.get('/api/parts', (req, res) => {
-    res.json(q.parts.all().map(p => ({ ...p, ...lifecycle(p, now()), open_request: q.openRequest.get(p.id) ?? null })));
+    res.json(q.parts.all().map(p => ({ ...p, ...lifecycle(p, now()), open_request: q.openRequest.get(p.id) ?? null, last_order: q.lastOrder.get(p.id) ?? null })));
   });
 
   app.post('/api/parts/:id/requests', (req, res) => {
@@ -88,14 +112,19 @@ function createApp({ db, now = () => new Date() }) {
     const part = q.part.get(Number(req.params.id));
     if (!part) throw new HttpError(404, 'part not found');
     const { status } = lifecycle(part, now());
-    if (status !== 'replace_soon' && status !== 'expired') throw new HttpError(409, `part does not need a supplier request (status: ${status})`);
     if (q.openRequest.get(part.id)) throw new HttpError(409, 'part already has an open request');
 
     const id = transaction(() => {
-      const scope = `Replace ${part.quantity} × ${part.name} on ${part.equipment_id} before end of service life.`;
+      const scope = status === 'replace_soon' || status === 'expired'
+        ? `Replace ${part.quantity} × ${part.name} on ${part.equipment_id} before end of service life.`
+        : `Order ${part.quantity} × ${part.name} for ${part.equipment_id}.`;
       const evidence = JSON.stringify(EVIDENCE[part.equipment_id] ?? []);
       const { lastInsertRowid } = q.insertRequest.run(part.id, scope, evidence, now().toISOString());
-      q.log.run(lastInsertRowid, 'drafted', actor, null, now().toISOString());
+      const base = q.lastPurchase.get(part.id)?.unit_price_gbp ?? FALLBACK_UNIT_PRICE;
+      for (const t of QUOTE_TEMPLATES) {
+        q.insertQuote.run(lastInsertRowid, t.supplier, t.included, t.excluded, t.lead_time_days, Math.round(base * t.factor / 5) * 5 || 1);
+      }
+      q.log.run(lastInsertRowid, 'quotes requested', actor, `${QUOTE_TEMPLATES.length} suppliers`, now().toISOString());
       return lastInsertRowid;
     });
     res.status(201).json(requestView(loadRequest(id)));
@@ -105,33 +134,33 @@ function createApp({ db, now = () => new Date() }) {
     res.json(requestView(loadRequest(req.params.id)));
   });
 
-  app.post('/api/requests/:id/send', (req, res) => {
+  app.post('/api/requests/:id/orders', (req, res) => {
     const actor = requireActor(req.body);
     const request = loadRequest(req.params.id);
-    if (request.status !== 'draft') throw new HttpError(409, `only a draft can be sent (status: ${request.status})`);
-    const part = q.part.get(request.part_id);
+    if (request.status !== 'open') throw new HttpError(409, `cannot order on a request that is ${request.status}`);
+    const quote = requestView(request).quotes.find(qt => qt.id === Number(req.body.quote_id));
+    if (!quote) throw new HttpError(400, 'quote_id must be a quote on this request');
+    const site = text(req.body, 'delivery_site') || DEFAULT_SITE;
 
     transaction(() => {
-      q.setStatus.run('sent', request.id);
-      q.log.run(request.id, 'approved and sent', actor, `${BID_TEMPLATES.length} suppliers`, now().toISOString());
-      for (const t of BID_TEMPLATES) {
-        q.insertBid.run(request.id, t.supplier, t.included, t.excluded, t.lead_time_days, t.unit * part.quantity);
-      }
+      q.insertOrder.run(request.id, quote.id, quote.quantity, quote.total_gbp, site,
+        text(req.body, 'po_reference') || null, text(req.body, 'notes') || null,
+        quote.expected_delivery, actor, now().toISOString());
+      q.setStatus.run('ordered', request.id);
+      q.insertPurchase.run(request.part_id, quote.supplier, quote.unit_price_gbp, quote.quantity, isoDate(now()));
+      q.log.run(request.id, 'order placed', actor, `${quote.supplier}, £${quote.total_gbp.toLocaleString('en-GB')}`, now().toISOString());
     });
-    res.json(requestView(loadRequest(request.id)));
+    res.status(201).json(requestView(loadRequest(request.id)));
   });
 
-  app.post('/api/requests/:id/award', (req, res) => {
+  // Closes a request when the part was bought outside this flow, so nobody orders it twice.
+  app.post('/api/requests/:id/already-purchased', (req, res) => {
     const actor = requireActor(req.body);
     const request = loadRequest(req.params.id);
-    if (request.status !== 'sent') throw new HttpError(409, `only a sent request can be awarded (status: ${request.status})`);
-    const bid = q.bids.all(request.id).find(b => b.id === Number(req.body.bid_id));
-    if (!bid) throw new HttpError(400, 'bid_id must be a bid on this request');
-
+    if (request.status !== 'open') throw new HttpError(409, `cannot mark a request that is ${request.status} as purchased`);
     transaction(() => {
-      q.awardBid.run(bid.id, request.id);
-      q.setStatus.run('awarded', request.id);
-      q.log.run(request.id, 'awarded', actor, `${bid.supplier}, £${bid.price_gbp.toLocaleString('en-GB')}`, now().toISOString());
+      q.setStatus.run('purchased', request.id);
+      q.log.run(request.id, 'marked already purchased', actor, null, now().toISOString());
     });
     res.json(requestView(loadRequest(request.id)));
   });
@@ -139,7 +168,7 @@ function createApp({ db, now = () => new Date() }) {
   app.post('/api/requests/:id/cancel', (req, res) => {
     const actor = requireActor(req.body);
     const request = loadRequest(req.params.id);
-    if (request.status === 'awarded' || request.status === 'cancelled') throw new HttpError(409, `cannot cancel a request that is ${request.status}`);
+    if (request.status !== 'open') throw new HttpError(409, `cannot cancel a request that is ${request.status}`);
     transaction(() => {
       q.setStatus.run('cancelled', request.id);
       q.log.run(request.id, 'cancelled', actor, null, now().toISOString());
@@ -164,4 +193,4 @@ function createApp({ db, now = () => new Date() }) {
   return app;
 }
 
-module.exports = { createApp, lifecycle };
+module.exports = { createApp, lifecycle, DEFAULT_SITE };
