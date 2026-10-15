@@ -10,6 +10,11 @@ How it got here, request by request: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ---
 
+
+https://github.com/user-attachments/assets/3175f3e0-ea36-4f32-a68e-56a8b967b9c9
+
+
+
 ## The problem
 
 A data center is full of parts that wear out: battery jars, fan kits, filters, capacitors. Manufacturers publish rated service lives, but real lifespans vary with temperature, load and maintenance. The information needed to decide when to replace a part and where to buy it can sit in several places: the rated life in a datasheet, quotes and supplier details in email or a purchasing system, and the record of how long the previous unit lasted in a maintenance log, if it was captured. Bringing these together at the moment a replacement is due could make the decision faster and easier to justify. This demo explores that idea.
