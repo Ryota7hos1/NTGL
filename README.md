@@ -6,7 +6,7 @@ A working prototype of how parts replacement could fit into [Entangl](https://ww
 
 > **How it was built.** I decided what to build and why, used Claude to build the base of each piece, then reshaped it request by request until it worked the way I intended. The product rules, thresholds and ranking weights are my own choices and judgment.
 
-How it got here, request by request: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Why I built it and how it connects to Entangl: [WHY_I_BUILT_THIS.md](WHY_I_BUILT_THIS.md). How it got here, request by request: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ---
 

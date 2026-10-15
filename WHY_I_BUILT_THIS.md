@@ -6,7 +6,9 @@ This summer I worked as a product manager and prototype engineer intern at Indee
 
 *This is an unofficial concept built from Entangl's public site only. It makes no claim about their internal plans, and every site, part, supplier and price in it is fictional.*
 
-> **Demo:** 
+> **Demo:** a 1-minute walkthrough below. The code, a README of the product decisions and the development log are in this repository.
+
+https://github.com/user-attachments/assets/3175f3e0-ea36-4f32-a68e-56a8b967b9c9
 
 ## The idea
 
