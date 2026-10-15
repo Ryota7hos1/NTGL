@@ -69,8 +69,7 @@ The delivery-based triggers mean a slow supplier makes a part due sooner, so the
 - An exact OEM part beats a compatible alternative. The part's previous supplier always counts as an exact match, since it supplied that part before.
 - So between exact parts that all arrive on time, the cheapest wins.
 
-The ranking only decides the order of the list. I kept the scores off the page because they cluttered the comparison, but every ranked quote carries its factor scores and plain-language reasons in the API, ready to show if engineers want them.
-*The engine is very simple for the purpose of the demo
+The ranking only decides the order of the list. I kept the scores off the page because they cluttered the comparison, but every ranked quote carries its factor scores and plain-language reasons in the API, ready to show if engineers want them. The engine is deliberately simple for this demo.
 
 **The procedure link.** Ordering a part is half the job; replacing it safely is the other half. The draft MOP ([server/procedure.js](server/procedure.js)) reflects the order (who installs, who disposes of the old parts, when delivery is due) and refuses to make up values such as torque settings. That gap is where Entangl's procedure generation and review would take over.
 
