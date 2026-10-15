@@ -42,6 +42,26 @@ test('previous lifespan triggers Due before the rated end of life, with a reason
   assert.equal(ratedSooner.due_reason, 'rated_end_of_life', 'the sooner trigger is the reason');
 });
 
+test("previous supplier's delivery time decides when the history-based trigger fires", () => {
+  const now = new Date('2026-01-01T00:00:00Z');
+  // The last unit failed at 800 days; this one is 731 days old, so 69 days until that age.
+  const part = { installed_on: '2024-01-01', service_life_days: 3000, quantity: 1, spares_on_hand: 0, previous_lifespan_days: 800 };
+  assert.equal(lifecycle(part, now, 14).status, 'ok', '14-day delivery lands 55 days before: not yet due');
+  const slow = lifecycle(part, now, 45);
+  assert.equal(slow.status, 'replace_soon', '45-day delivery lands 24 days before: due');
+  assert.equal(slow.due_reason, 'previous_service_life');
+  assert.equal(slow.previous_supplier_lead_days, 45);
+});
+
+test("previous supplier's delivery near the rated end of life makes a part due before the 90-day window", () => {
+  const now = new Date('2026-01-01T00:00:00Z');
+  const part = { installed_on: '2025-01-01', service_life_days: 485, quantity: 1, spares_on_hand: 0 }; // 120 days left
+  assert.equal(lifecycle(part, now, 14).status, 'ok', 'outside 90 days and a quick delivery');
+  const longLead = lifecycle(part, now, 100);
+  assert.equal(longLead.status, 'replace_soon', 'a 100-day delivery would land 20 days before end of life');
+  assert.equal(longLead.due_reason, 'rated_end_of_life');
+});
+
 test('lifecycle derives status from install date, service life and spares', () => {
   const now = new Date('2026-01-01T00:00:00Z');
   const part = { installed_on: '2025-01-01', service_life_days: 400, quantity: 4, spares_on_hand: 0 };
@@ -79,7 +99,7 @@ test('full flow: request quotes, then place an order, with audit trail', async (
   assert.equal(ordered.body.order.notes, 'weekday delivery');
   assert.deepEqual(ordered.body.audit.map(a => [a.action, a.actor]), [
     ['quotes requested', 'R. Hosokawa'],
-    ['order placed', 'A. Engineer'],
+    ['order recorded', 'A. Engineer'],
   ]);
 });
 
@@ -139,7 +159,7 @@ test('already purchased closes the request so it cannot be ordered', async () =>
   const { body: request } = await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R' });
   assert.equal((await api('POST', `/api/requests/${request.id}/already-purchased`, {})).status, 400);
 
-  const marked = await api('POST', `/api/requests/${request.id}/already-purchased`, { actor: 'R' });
+  const marked = await api('POST', `/api/requests/${request.id}/already-purchased`, { actor: 'R', supplier: 'Local wholesaler', expected_delivery: '2026-01-10' });
   assert.equal(marked.body.status, 'purchased');
   assert.equal(marked.body.audit.at(-1).action, 'marked already purchased');
   assert.equal((await batteries()).open_request, null);
@@ -153,7 +173,7 @@ test('orders list and activity log cover every part', async () => {
   const { body: batteryRequest } = await api('POST', `/api/parts/${parts[0].id}/requests`, { actor: 'R' });
   await api('POST', `/api/requests/${batteryRequest.id}/orders`, { actor: 'R', quote_id: batteryRequest.quotes[2].id, po_reference: 'PO-1' });
   const { body: fanRequest } = await api('POST', `/api/parts/${parts[1].id}/requests`, { actor: 'S' });
-  await api('POST', `/api/requests/${fanRequest.id}/already-purchased`, { actor: 'S' });
+  await api('POST', `/api/requests/${fanRequest.id}/already-purchased`, { actor: 'S', supplier: 'Local wholesaler', expected_delivery: '2026-01-10' });
   await api('POST', `/api/parts/${parts[2].id}/requests`, { actor: 'T' });
 
   const { body: orders } = await api('GET', '/api/orders');
@@ -169,7 +189,7 @@ test('orders list and activity log cover every part', async () => {
     ['Air filters G4', 'quotes requested'],
     ['Fan kit F-210', 'marked already purchased'],
     ['Fan kit F-210', 'quotes requested'],
-    ['VRLA jars BS-12', 'order placed'],
+    ['VRLA jars BS-12', 'order recorded'],
     ['VRLA jars BS-12', 'quotes requested'],
   ]);
 });
@@ -201,7 +221,7 @@ test('ordering or buying a due part resolves it; ok parts keep their status', as
   const { body: parts } = await api('GET', '/api/parts');
   const starter = parts.find(p => p.name === 'Starter batteries 24V');
   const { body: starterRequest } = await api('POST', `/api/parts/${starter.id}/requests`, { actor: 'R' });
-  await api('POST', `/api/requests/${starterRequest.id}/already-purchased`, { actor: 'R' });
+  await api('POST', `/api/requests/${starterRequest.id}/already-purchased`, { actor: 'R', supplier: 'Local wholesaler', expected_delivery: '2026-01-10' });
   assert.equal((await api('GET', '/api/parts')).body.find(p => p.id === starter.id).status, 'replacement_ordered');
 
   const healthy = parts.find(p => p.status === 'ok');
@@ -286,4 +306,73 @@ test('the previous supplier is quoted as an exact match for the part it supplied
   const batteries = parts.find(p => p.name === 'VRLA jars BS-12'); // last bought from Volta: Cellstock stays an alternative
   const { body: other } = await api('POST', `/api/parts/${batteries.id}/requests`, { actor: 'R' });
   assert.equal(other.quotes.find(q => q.supplier === 'Cellstock Direct').match, 'equivalent');
+});
+
+test('quotes link to the supplier, and recording an order can set the confirmed delivery date', async () => {
+  const part = await batteries();
+  const { body: request } = await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R' });
+  const volta = request.quotes.find(q => q.supplier === 'Volta Critical Supply');
+  assert.equal(volta.supplier_url, 'https://example.com/demo-supplier/volta-critical-supply?part=VRLA%20jars%20BS-12');
+
+  const bad = await api('POST', `/api/requests/${request.id}/orders`, { actor: 'R', quote_id: volta.id, expected_delivery: 'next week' });
+  assert.equal(bad.status, 400);
+  const past = await api('POST', `/api/requests/${request.id}/orders`, { actor: 'R', quote_id: volta.id, expected_delivery: '2020-01-01' });
+  assert.equal(past.status, 400);
+
+  const recorded = await api('POST', `/api/requests/${request.id}/orders`, { actor: 'R', quote_id: volta.id, expected_delivery: '2099-03-01', po_reference: 'PO-9' });
+  assert.equal(recorded.status, 201);
+  assert.equal(recorded.body.order.expected_delivery, '2099-03-01');
+  assert.equal(recorded.body.audit.at(-1).detail, `Volta Critical Supply, £${volta.total_gbp.toLocaleString('en-GB')}, due 2099-03-01`);
+});
+
+test('already purchased is recorded like an order', async () => {
+  const part = await batteries();
+  const { body: request } = await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R' });
+  const url = `/api/requests/${request.id}/already-purchased`;
+  assert.equal((await api('POST', url, { actor: 'R', expected_delivery: '2026-11-01' })).status, 400, 'supplier required');
+  assert.equal((await api('POST', url, { actor: 'R', supplier: 'X' })).status, 400, 'delivery date required');
+  assert.equal((await api('POST', url, { actor: 'R', supplier: 'X', expected_delivery: '2026-11-01', total_gbp: -5 })).status, 400);
+
+  // A past date is fine: a part bought elsewhere may already have arrived.
+  const done = await api('POST', url, { actor: 'R', supplier: 'Local wholesaler', expected_delivery: '2020-02-01', total_gbp: 6000, po_reference: 'PO-77' });
+  assert.equal(done.status, 200);
+  assert.equal(done.body.status, 'purchased');
+  assert.deepEqual([done.body.order.supplier, done.body.order.total_gbp, done.body.order.quote_id, done.body.order.po_reference], ['Local wholesaler', 6000, null, 'PO-77']);
+  assert.deepEqual([done.body.last_purchase.supplier, done.body.last_purchase.unit_price_gbp], ['Local wholesaler', 150], 'becomes the last purchase');
+
+  const { body: orders } = await api('GET', '/api/orders');
+  assert.deepEqual([orders[0].source, orders[0].supplier, orders[0].total_gbp, orders[0].expected_delivery], ['purchased_elsewhere', 'Local wholesaler', 6000, '2020-02-01']);
+});
+
+test('already purchased without a price does not change the last purchase', async () => {
+  const part = await batteries();
+  const { body: request } = await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R' });
+  const done = await api('POST', `/api/requests/${request.id}/already-purchased`, { actor: 'R', supplier: 'Local wholesaler', expected_delivery: '2026-11-01' });
+  assert.equal(done.body.order.total_gbp, null);
+  assert.equal(done.body.last_purchase.supplier, 'Volta Critical Supply');
+});
+
+test('each request links to a draft replacement procedure built from the part, machine and order', async () => {
+  const part = await batteries();
+  const { body: request } = await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R' });
+  const draft = (await api('GET', `/api/requests/${request.id}/procedure`)).body;
+  assert.equal(draft.id, `MOP-${String(request.id).padStart(3, '0')}`);
+  assert.equal(draft.title, 'Replace 40 × VRLA jars BS-12 on BS-A1');
+  assert.equal(draft.status, 'draft');
+  assert.equal(draft.order, null);
+  assert.deepEqual(draft.documents, ['OPS-RULES rev 7', 'BAT-DS rev 2', 'SLD-101 rev C']);
+  assert.ok(draft.steps.some(s => s.needs_input), 'flags the steps that need an engineer');
+
+  // After ordering, the procedure picks up the supplier, delivery date and who does install/disposal.
+  const northbank = request.quotes.find(q => q.supplier === 'Northbank Power Services'); // supply, install, disposal
+  await api('POST', `/api/requests/${request.id}/orders`, { actor: 'R', quote_id: northbank.id });
+  const withOrder = (await api('GET', `/api/requests/${request.id}/procedure`)).body;
+  assert.equal(withOrder.order.supplier, 'Northbank Power Services');
+  assert.match(withOrder.steps[1].text, /delivery of 40 × VRLA jars BS-12 from Northbank Power Services/);
+  assert.match(withOrder.steps[3].text, /Northbank Power Services installs/);
+  assert.match(withOrder.steps[4].text, /to Northbank Power Services for disposal/);
+
+  const { body: orders } = await api('GET', '/api/orders');
+  assert.equal(orders[0].procedure_id, withOrder.id);
+  assert.equal((await api('GET', '/api/requests/9999/procedure')).status, 404);
 });

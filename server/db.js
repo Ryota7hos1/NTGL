@@ -42,9 +42,10 @@ CREATE TABLE IF NOT EXISTS quotes (
 CREATE TABLE IF NOT EXISTS orders (
   id                INTEGER PRIMARY KEY,
   request_id        INTEGER NOT NULL UNIQUE REFERENCES supplier_requests(id),
-  quote_id          INTEGER NOT NULL REFERENCES quotes(id),
+  quote_id          INTEGER REFERENCES quotes(id),  -- null when the part was bought elsewhere
+  supplier          TEXT NOT NULL,
   quantity          INTEGER NOT NULL,
-  total_gbp         INTEGER NOT NULL,
+  total_gbp         INTEGER,                -- may be unknown for a purchase made elsewhere
   delivery_site     TEXT NOT NULL,
   po_reference      TEXT,
   notes             TEXT,

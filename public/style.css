@@ -90,3 +90,13 @@ a{color:inherit}
 .part-label{display:inline-block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);border:1px solid var(--line);border-radius:3px;padding:0 4px;margin-right:6px;vertical-align:1px}
 .warn-text{color:var(--warn);font-weight:500}
 .pop-part-side .chip{white-space:normal;text-align:right;max-width:150px;border-radius:6px}
+/* Supplier rows link out to buy; recording the order happens inline. */
+a.btn{display:inline-block;text-decoration:none;text-align:center}
+.quote-actions{display:flex;flex-direction:column;gap:6px;align-items:stretch}
+.mark-form{background:var(--accbg);border:1px solid var(--line);border-radius:4px;padding:12px;margin:0 0 12px}
+.mark-form .row label{flex:1;min-width:180px}
+.notice{background:var(--okbg);color:var(--ok);border-radius:4px;padding:8px 12px;margin:0 0 12px}
+/* Replacement procedure */
+.proc-link{display:inline-block;margin:0 0 10px;font-weight:500;color:var(--acc)}
+.proc-steps{margin:0;padding-left:22px;display:grid;gap:10px}
+.proc-steps li{padding-left:4px}.proc-steps li.needs{border-left:3px solid var(--warn);padding-left:8px;margin-left:-7px}
