@@ -35,7 +35,9 @@ CREATE TABLE IF NOT EXISTS quotes (
   included       TEXT NOT NULL,
   excluded       TEXT NOT NULL,
   lead_time_days INTEGER NOT NULL,
-  unit_price_gbp INTEGER NOT NULL
+  unit_price_gbp INTEGER NOT NULL,
+  match          TEXT NOT NULL CHECK (match IN ('exact','equivalent')),  -- exact OEM part or a compatible alternative
+  offered_part   TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS orders (
   id                INTEGER PRIMARY KEY,

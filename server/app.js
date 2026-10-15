@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('node:path');
 const { reset } = require('./db');
+const { recommend } = require('./recommend');
 
 const DAY = 86400000;
 const WARN_DAYS = 90;
@@ -10,14 +11,18 @@ const DEFAULT_SITE = 'Demo Site LHR-1, Hall A';
 const EVIDENCE = {
   'BS-A1': ['BAT-DS rev 2', 'SLD-101 rev C'],
   'CRAH-3': ['CRAH-3 O&M manual rev 1'],
+  'UPS-A': ['MAN-UPSX rev 4', 'SLD-101 rev C'],
+  'GEN-1': ['GEN-1 O&M manual rev 2'],
 };
 
 // Simulated supplier quotes, created with each request. Suppliers are fictional; each unit price
-// is the part's last purchase price scaled by a per-supplier factor.
+// is the part's last purchase price scaled by a per-supplier factor. `match` says whether the
+// supplier offers the exact OEM part or a compatible alternative.
 const QUOTE_TEMPLATES = [
-  { supplier: 'Northbank Power Services', included: 'Supply, install, disposal', excluded: 'Load bank test', lead_time_days: 21, factor: 1.27 },
-  { supplier: 'Volta Critical Supply', included: 'Supply, install', excluded: 'Disposal, testing', lead_time_days: 14, factor: 1.09 },
-  { supplier: 'Cellstock Direct', included: 'Supply only', excluded: 'Install, disposal', lead_time_days: 5, factor: 0.85 },
+  { supplier: 'Northbank Power Services', included: 'Supply, install, disposal', excluded: 'Load bank test', lead_time_days: 21, factor: 1.27, match: 'exact' },
+  { supplier: 'Volta Critical Supply', included: 'Supply, install', excluded: 'Disposal, testing', lead_time_days: 14, factor: 1.09, match: 'exact' },
+  { supplier: 'Cellstock Direct', included: 'Supply only', excluded: 'Install, disposal', lead_time_days: 5, factor: 0.85, match: 'equivalent' },
+  { supplier: 'Meridian Express Spares', included: 'Supply only, express courier', excluded: 'Install, disposal', lead_time_days: 2, factor: 1.45, match: 'exact' },
 ];
 const FALLBACK_UNIT_PRICE = 100;
 
@@ -81,7 +86,7 @@ function createApp({ db, now = () => new Date() }) {
     insertRequest: db.prepare(`INSERT INTO supplier_requests (part_id, scope, evidence, status, created_at) VALUES (?, ?, ?, 'open', ?)`),
     setStatus: db.prepare('UPDATE supplier_requests SET status = ? WHERE id = ?'),
     quotes: db.prepare('SELECT * FROM quotes WHERE request_id = ? ORDER BY id'),
-    insertQuote: db.prepare('INSERT INTO quotes (request_id, supplier, included, excluded, lead_time_days, unit_price_gbp) VALUES (?, ?, ?, ?, ?, ?)'),
+    insertQuote: db.prepare('INSERT INTO quotes (request_id, supplier, included, excluded, lead_time_days, unit_price_gbp, match, offered_part) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'),
     order: db.prepare('SELECT * FROM orders WHERE request_id = ?'),
     insertOrder: db.prepare(`INSERT INTO orders (request_id, quote_id, quantity, total_gbp, delivery_site, po_reference, notes, expected_delivery, placed_by, placed_at)
                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
@@ -137,11 +142,13 @@ function createApp({ db, now = () => new Date() }) {
       total_gbp: quote.unit_price_gbp * part.quantity,
       expected_delivery: isoDate(new Date(at.getTime() + quote.lead_time_days * DAY)),
     }));
+    const partView = { ...part, ...lifecycle(part, at) };
     return {
       ...request,
       evidence: JSON.parse(request.evidence),
-      part: { ...part, ...lifecycle(part, at) },
+      part: partView,
       quotes,
+      recommendation: recommend(partView, quotes, at),
       last_purchase: lastPurchase,
       order: q.order.get(request.id) ?? null,
       audit: q.audit.all(request.id),
@@ -183,9 +190,13 @@ function createApp({ db, now = () => new Date() }) {
         : `Order ${part.quantity} × ${part.name} for ${part.equipment_id}.`;
       const evidence = JSON.stringify(EVIDENCE[part.equipment_id] ?? []);
       const { lastInsertRowid } = q.insertRequest.run(part.id, scope, evidence, now().toISOString());
-      const base = q.lastPurchase.get(part.id)?.unit_price_gbp ?? FALLBACK_UNIT_PRICE;
+      const last = q.lastPurchase.get(part.id);
+      const base = last?.unit_price_gbp ?? FALLBACK_UNIT_PRICE;
       for (const t of QUOTE_TEMPLATES) {
-        q.insertQuote.run(lastInsertRowid, t.supplier, t.included, t.excluded, t.lead_time_days, Math.round(base * t.factor / 5) * 5 || 1);
+        // The supplier that provided the part last time can supply the exact same part again.
+        const match = t.supplier === last?.supplier ? 'exact' : t.match;
+        const offered = match === 'exact' ? `${part.name} (OEM)` : `${part.name}-compatible alternative`;
+        q.insertQuote.run(lastInsertRowid, t.supplier, t.included, t.excluded, t.lead_time_days, Math.round(base * t.factor / 5) * 5 || 1, match, offered);
       }
       q.log.run(part.id, lastInsertRowid, 'quotes requested', actor, `${QUOTE_TEMPLATES.length} suppliers`, now().toISOString());
       return lastInsertRowid;

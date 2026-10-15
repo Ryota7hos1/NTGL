@@ -106,16 +106,22 @@ const priceChange=x=>x.change_vs_last_gbp===null?'':x.change_vs_last_gbp===0?'<b
   :`<br><span class="delta ${x.change_vs_last_gbp>0?'up':'down'}">${x.change_vs_last_gbp>0?'+':'−'}${gbp(Math.abs(x.change_vs_last_gbp))} vs last</span>`;
 
 // Supplier quotes for a part, each with a route to the order screen.
+const MATCH_LABEL={exact:['ok','Exact OEM part'],equivalent:['warn','Compatible alternative']};
+
 function suppliersPage(r){
+  const rec=r.recommendation;
   const cheapest=Math.min(...r.quotes.map(x=>x.total_gbp));
+  // Same list as before the engine, just in the engine's order.
+  const rankOf=id=>rec.ranked.find(x=>x.quote_id===id);
+  const ordered=[...r.quotes].sort((a,b)=>rankOf(a.id).rank-rankOf(b.id).rank);
   return `<button class="btn ghost" id="toEquipment">← Back to equipment</button>
   <div class="row" style="margin-top:14px"><h2 style="margin:0">Suppliers</h2>
    <span style="margin-left:auto" class="row"><button class="btn ghost" id="purchased">Already purchased</button><button class="btn ghost" id="cancel">Cancel request</button></span></div>
   <p class="lead">${esc(r.part.name)} × ${r.part.quantity} for ${esc(r.part.equipment_id)}</p>
   <div class="card fade" id="request">
-   <p class="muted">${esc(r.scope)} ${r.part.status==='failed'?`Failed on ${r.part.end_of_life} (rated to ${r.part.rated_end_of_life}).`:`End of life ${r.part.end_of_life}.`} Evidence: ${r.evidence.map(e=>`<span class="chip">${esc(e)}</span>`).join('')}</p>
+   <p class="muted">${esc(r.scope)} ${r.part.status==='failed'?`Failed on ${r.part.end_of_life} (rated to ${r.part.rated_end_of_life}).`:`End of life ${r.part.end_of_life}.`} ${r.evidence.length?`Evidence: ${r.evidence.map(e=>`<span class="chip">${esc(e)}</span>`).join('')}`:''}</p>
    ${r.last_purchase?`<div class="last-buy">Last obtained <b>${gbp(r.last_purchase.unit_price_gbp)} each</b> from <b>${esc(r.last_purchase.supplier)}</b> on ${r.last_purchase.purchased_on} (${r.last_purchase.quantity} units)</div>`:''}
-   <div class="quotes">${r.quotes.map(x=>`<div class="quote">
+   <div class="quotes">${ordered.map(x=>`<div class="quote">
      <div><b>${esc(x.supplier)}</b>${x.previous_supplier?' <span class="chip warn">Previous supplier</span>':''}${x.total_gbp===cheapest?' <span class="chip">Lowest price</span>':''}<br><span class="muted">Includes ${esc(x.included.toLowerCase())} · excludes ${esc(x.excluded.toLowerCase())}</span></div>
      <div><span class="muted">Delivery</span><br>${x.lead_time_days} days · ${x.expected_delivery}<br>${arrival(x.expected_delivery,r)}</div>
      <div class="price"><span class="muted">${gbp(x.unit_price_gbp)} each</span>${priceChange(x)}<br><b>${gbp(x.total_gbp)}</b></div>
@@ -133,6 +139,7 @@ function orderView(r,x){
     <tr><td class="muted">Supplier</td><td><b>${esc(x.supplier)}</b></td></tr>
     <tr><td class="muted">Part</td><td>${esc(r.part.name)} for ${esc(r.part.equipment_id)}</td></tr>
     <tr><td class="muted">Quantity</td><td>${x.quantity} × ${gbp(x.unit_price_gbp)}</td></tr>
+    <tr><td class="muted">Part offered</td><td>${esc(x.offered_part)} <span class="chip ${MATCH_LABEL[x.match][0]}">${MATCH_LABEL[x.match][1]}</span></td></tr>
     <tr><td class="muted">Includes</td><td>${esc(x.included)}</td></tr>
     <tr><td class="muted">Excludes</td><td>${esc(x.excluded)}</td></tr>
     <tr><td class="muted">Expected delivery</td><td>${x.expected_delivery} ${arrival(x.expected_delivery,r)}</td></tr>

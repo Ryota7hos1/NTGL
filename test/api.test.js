@@ -63,7 +63,7 @@ test('full flow: request quotes, then place an order, with audit trail', async (
   const created = await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R. Hosokawa' });
   assert.equal(created.status, 201);
   assert.equal(created.body.status, 'open');
-  assert.equal(created.body.quotes.length, 3);
+  assert.equal(created.body.quotes.length, 4);
   const quote = created.body.quotes[1];
   assert.equal(quote.total_gbp, quote.unit_price_gbp * part.quantity);
   assert.equal((await batteries()).open_request.status, 'open');
@@ -249,4 +249,41 @@ test('seeded fan kit is due because it is nearing the age the last one failed at
   const ups = body.find(p => p.name === 'DC capacitor bank');
   assert.equal(ups.status, 'ok');
   assert.equal(ups.days_until_previous_failure, 445);
+});
+
+test('recommendations follow what the site needs', async () => {
+  const { body: parts } = await api('GET', '/api/parts');
+  const top = async part => {
+    const { body } = await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R' });
+    const best = body.quotes.find(q => q.id === body.recommendation.ranked[0].quote_id);
+    return { body, best };
+  };
+
+  // Due batteries: every quote lands in time, so the exact part at a sensible price wins.
+  const battery = await top(parts.find(p => p.name === 'VRLA jars BS-12'));
+  assert.equal(battery.body.recommendation.need.urgency, 'due');
+  assert.equal(battery.best.supplier, 'Volta Critical Supply');
+  assert.deepEqual(battery.body.recommendation.ranked.map(r => r.rank), [1, 2, 3, 4]);
+
+  // A failed part: the fastest exact delivery wins even though it is the most expensive.
+  const ups = parts.find(p => p.name === 'DC capacitor bank');
+  await api('POST', `/api/parts/${ups.id}/destroy`, { actor: 'R' });
+  const failed = await top(ups);
+  assert.equal(failed.body.recommendation.need.urgency, 'failing');
+  assert.equal(failed.best.supplier, 'Meridian Express Spares');
+  assert.equal(failed.body.recommendation.weights.delivery, 0.6);
+});
+
+test('the previous supplier is quoted as an exact match for the part it supplied before', async () => {
+  const { body: parts } = await api('GET', '/api/parts');
+  const filters = parts.find(p => p.name === 'Air filters G4');   // last bought from Cellstock Direct
+  const { body: request } = await api('POST', `/api/parts/${filters.id}/requests`, { actor: 'R' });
+  const cellstock = request.quotes.find(q => q.supplier === 'Cellstock Direct');
+  assert.equal(cellstock.previous_supplier, true);
+  assert.equal(cellstock.match, 'exact');
+  assert.equal(cellstock.offered_part, 'Air filters G4 (OEM)');
+
+  const batteries = parts.find(p => p.name === 'VRLA jars BS-12'); // last bought from Volta: Cellstock stays an alternative
+  const { body: other } = await api('POST', `/api/parts/${batteries.id}/requests`, { actor: 'R' });
+  assert.equal(other.quotes.find(q => q.supplier === 'Cellstock Direct').match, 'equivalent');
 });
