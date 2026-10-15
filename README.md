@@ -83,6 +83,12 @@ The ranking only decides the order of the list. I kept the scores off the page b
 
 **The procedure link.** Ordering a part is half the job; replacing it safely is the other half. The draft MOP ([server/procedure.js](server/procedure.js)) reflects the order (who installs, who disposes of the old parts, when delivery is due) and refuses to make up values such as torque settings. That gap is where Entangl's procedure generation and review would take over.
 
+### Would it scale beyond one site?
+
+Partly. When a part is due, which supplier ranks first, and whether an order resolves it are all computed from each part's data (install date, rated service life, how long the last unit lasted, spares on hand), not written per machine, so a new machine or part is just new rows in `equipment` and `parts`. What doesn't scale yet: there is no table of sites, so every machine belongs to one site, and the delivery site, the documents cited on each request and the machine positions in the drawing are hard-coded in `server/app.js` and `public/site.js`. Everything also lives in a single SQLite file. Supporting several sites would need site-scoped data and storage, plus the sign-in, roles and real supplier quotes listed under Limitations.
+
+<!-- TODO(author): confirm this answer reflects your view -->
+
 ---
 
 ## Architecture
