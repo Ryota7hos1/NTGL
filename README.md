@@ -64,7 +64,7 @@ The delivery-based triggers mean a slow supplier makes a part due sooner, so the
 | Due | 30% | 40% | 30% |
 | Planned | 10% | 45% | 45% |
 
-- For a failed part, the fastest delivery wins.
+- For a failed part, or one past its end of life, speed counts most: the fastest delivery gets full marks for delivery, the slowest none.
 - Otherwise, the engine looks at each quote's margin: how many days before the needed-by date it arrives (the rated end of life, or the age the last unit failed at if that is why the part is due). Every on-time quote gets full marks for delivery. A late quote scores zero, and so does an on-time quote whose margin is drastically smaller than the best other quote's: more than 365 days smaller, or a tenth of it or less.
 - An exact OEM part beats a compatible alternative. The part's previous supplier always counts as an exact match, since it supplied that part before.
 - So between exact parts that all arrive on time, the cheapest wins.
@@ -108,11 +108,13 @@ server/
 test/
   api.test.js      API behaviour, end to end against an in-memory database
   recommend.test.js  Recommendation engine rules
+docs/
+  DEVELOPMENT.md   Step-by-step development log
 ```
 
 - **Runtime:** Node.js 22.13+ with Express 5.
 - **Database:** SQLite through Node's built-in `node:sqlite`, so there is nothing native to compile. Stored at `data/ntgl.db` and created with seed data on first run.
-- **Tests:** Node's built-in test runner. 34 tests.
+- **Tests:** Node's built-in test runner. 36 tests.
 
 ### Data model
 
