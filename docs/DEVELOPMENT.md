@@ -2,6 +2,8 @@
 
 How this prototype got to where it is: each request I made, in order, what changed, and why. The product decisions behind the current version are summarised in the [README](../README.md); this is the path that led to them.
 
+**How it was built.** I decided what to build and why, used Claude to build the base of each piece, then reshaped it request by request until it worked the way I intended. The product rules, thresholds and ranking weights are my own choices and judgment.
+
 The git history groups these steps into milestone commits (listed at the end). Those commits were made after the fact by replaying the changes in order, so their dates are not the dates the work happened.
 
 ---

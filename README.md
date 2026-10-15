@@ -4,6 +4,8 @@ A working prototype of how parts replacement could fit into [Entangl](https://ww
 
 > **Unofficial.** This is a proposed extension built for a job application, not an Entangl product. All sites, drawings, parts, suppliers and prices are fictional.
 
+> **How it was built.** I decided what to build and why, used Claude to build the base of each piece, then reshaped it request by request until it worked the way I intended. The product rules, thresholds and ranking weights are my own choices and judgment.
+
 How it got here, request by request: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ---
