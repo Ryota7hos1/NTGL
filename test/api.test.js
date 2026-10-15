@@ -35,7 +35,7 @@ test('lifecycle derives status from install date, service life and spares', () =
 
 test('seeded parts expose computed lifecycle fields', async () => {
   const { body } = await api('GET', '/api/parts');
-  assert.deepEqual(body.map(p => p.status), ['replace_soon', 'ok', 'due_spares_on_hand']);
+  assert.deepEqual(body.map(p => p.status), ['replace_soon', 'ok', 'due_spares_on_hand', 'ok', 'replace_soon', 'ok']);
   assert.equal(body[0].days_remaining, 62);
 });
 
@@ -127,4 +127,40 @@ test('already purchased closes the request so it cannot be ordered', async () =>
   assert.equal((await batteries()).last_order.status, 'purchased');
   assert.equal((await api('POST', `/api/requests/${request.id}/orders`, { actor: 'R', quote_id: request.quotes[0].id })).status, 409);
   assert.equal((await api('POST', `/api/parts/${part.id}/requests`, { actor: 'R' })).status, 201, 'can order the part again later');
+});
+
+test('orders list and activity log cover every part', async () => {
+  const { body: parts } = await api('GET', '/api/parts');
+  const { body: batteryRequest } = await api('POST', `/api/parts/${parts[0].id}/requests`, { actor: 'R' });
+  await api('POST', `/api/requests/${batteryRequest.id}/orders`, { actor: 'R', quote_id: batteryRequest.quotes[2].id, po_reference: 'PO-1' });
+  const { body: fanRequest } = await api('POST', `/api/parts/${parts[1].id}/requests`, { actor: 'S' });
+  await api('POST', `/api/requests/${fanRequest.id}/already-purchased`, { actor: 'S' });
+  await api('POST', `/api/parts/${parts[2].id}/requests`, { actor: 'T' });
+
+  const { body: orders } = await api('GET', '/api/orders');
+  assert.deepEqual(orders.map(o => [o.part, o.source]), [
+    ['Fan kit F-210', 'purchased_elsewhere'],
+    ['VRLA jars BS-12', 'ordered'],
+  ]);
+  assert.equal(orders[1].supplier, batteryRequest.quotes[2].supplier);
+  assert.equal(orders[1].po_reference, 'PO-1');
+
+  const { body: audit } = await api('GET', '/api/audit');
+  assert.deepEqual(audit.map(a => [a.part, a.action]), [
+    ['Air filters G4', 'quotes requested'],
+    ['Fan kit F-210', 'marked already purchased'],
+    ['Fan kit F-210', 'quotes requested'],
+    ['VRLA jars BS-12', 'order placed'],
+    ['VRLA jars BS-12', 'quotes requested'],
+  ]);
+});
+
+test('equipment groups its parts and reports the most urgent status', async () => {
+  const { body } = await api('GET', '/api/equipment');
+  const byId = Object.fromEntries(body.map(e => [e.id, e]));
+  assert.deepEqual(Object.keys(byId).sort(), ['BS-A1', 'CRAH-3', 'GEN-1', 'UPS-A']);
+  assert.equal(byId['BS-A1'].status, 'replace_soon');
+  assert.equal(byId['CRAH-3'].status, 'due_spares_on_hand');
+  assert.equal(byId['UPS-A'].status, 'ok');
+  assert.deepEqual(byId['GEN-1'].parts.map(p => p.name), ['Starter batteries 24V', 'Fuel filters']);
 });

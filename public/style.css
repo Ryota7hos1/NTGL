@@ -54,3 +54,19 @@ select,input,textarea{font:inherit;padding:7px;border-radius:3px;border:1px soli
 .top .btn.ghost{color:var(--hdr-ink);border-color:var(--hdr-line)}.top .btn.ghost:hover{border-color:var(--lime);color:var(--lime)}
 .btn:not(.ghost):not(:disabled):hover{filter:brightness(1.15)}
 h2 .chip,.lead .chip{vertical-align:middle}
+.tabs{display:flex;gap:4px}
+.tabs button{background:none;border:0;border-bottom:2px solid transparent;color:#a9bcae;padding:6px 10px;font:inherit;cursor:pointer}
+.tabs button:hover{color:var(--hdr-ink)}.tabs button.on{color:var(--hdr-ink);border-bottom-color:var(--lime)}
+a{color:inherit}
+.nowrap{white-space:nowrap}.scroll{overflow-x:auto}
+/* Site tab: dark green stage like entangl.com's hero. */
+.site-hero{background:radial-gradient(ellipse at 50% 30%,#1d4a3a,#0f2c22 75%);border-radius:6px;padding:16px 12px 12px;overflow:hidden}
+.site-svg{display:block;width:100%;height:auto;max-height:520px;font-family:inherit}
+.site-legend{display:flex;flex-wrap:wrap;gap:6px 16px;color:#dfe7d8;font-size:12px;padding:8px 6px 0}
+.site-legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.site-legend .muted-light{margin-left:auto;color:#9fb2a5}
+.equip-parts{list-style:none;margin:0;padding:0}.equip-parts li{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}
+.site-hero{position:relative}
+.machine{cursor:pointer}.machine:hover{filter:brightness(1.12)}.site-tag:focus{outline:none}.site-tag:focus rect{stroke:var(--lime);stroke-width:2}
+.site-popup{position:absolute;width:300px;max-width:calc(100% - 16px);z-index:2;box-shadow:0 12px 32px rgba(0,0,0,.35)}
+.popup-close{background:none;border:0;color:var(--mut);font-size:20px;line-height:1;cursor:pointer;padding:0 2px}

@@ -43,6 +43,7 @@ function createApp({ db, now = () => new Date() }) {
 
   const q = {
     parts: db.prepare('SELECT * FROM parts ORDER BY id'),
+    equipment: db.prepare('SELECT * FROM equipment ORDER BY id'),
     part: db.prepare('SELECT * FROM parts WHERE id = ?'),
     openRequest: db.prepare(`SELECT id, status FROM supplier_requests WHERE part_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1`),
     lastOrder: db.prepare(`SELECT id, status FROM supplier_requests WHERE part_id = ? AND status IN ('ordered','purchased') ORDER BY id DESC LIMIT 1`),
@@ -58,6 +59,21 @@ function createApp({ db, now = () => new Date() }) {
                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     audit: db.prepare('SELECT action, actor, detail, at FROM audit_log WHERE request_id = ? ORDER BY id'),
     log: db.prepare('INSERT INTO audit_log (request_id, action, actor, detail, at) VALUES (?, ?, ?, ?, ?)'),
+    // Orders placed here plus requests closed as bought elsewhere, newest first.
+    allOrders: db.prepare(`
+      SELECT r.id AS request_id, 'ordered' AS source, o.id AS order_id, p.name AS part, p.equipment_id, o.quantity,
+             qt.supplier, o.total_gbp, o.expected_delivery, o.po_reference, o.placed_by AS actor, o.placed_at AS at
+        FROM orders o JOIN supplier_requests r ON r.id = o.request_id JOIN parts p ON p.id = r.part_id JOIN quotes qt ON qt.id = o.quote_id
+      UNION ALL
+      SELECT r.id, 'purchased_elsewhere', NULL, p.name, p.equipment_id, p.quantity, NULL, NULL, NULL, NULL, a.actor, a.at
+        FROM supplier_requests r JOIN parts p ON p.id = r.part_id
+        JOIN audit_log a ON a.request_id = r.id AND a.action = 'marked already purchased'
+       WHERE r.status = 'purchased'
+      ORDER BY at DESC, request_id DESC`),
+    allAudit: db.prepare(`
+      SELECT a.id, a.request_id, a.action, a.actor, a.detail, a.at, p.name AS part, p.equipment_id
+        FROM audit_log a JOIN supplier_requests r ON r.id = a.request_id JOIN parts p ON p.id = r.part_id
+       ORDER BY a.id DESC`),
   };
 
   const transaction = fn => {
@@ -128,6 +144,25 @@ function createApp({ db, now = () => new Date() }) {
       return lastInsertRowid;
     });
     res.status(201).json(requestView(loadRequest(id)));
+  });
+
+  // Equipment with its parts and the most urgent part status, for the site view.
+  const URGENCY = ['ok', 'due_spares_on_hand', 'replace_soon', 'expired'];
+  app.get('/api/equipment', (req, res) => {
+    const parts = q.parts.all().map(p => ({ id: p.id, name: p.name, quantity: p.quantity, equipment_id: p.equipment_id, ...lifecycle(p, now()) }));
+    res.json(q.equipment.all().map(e => {
+      const own = parts.filter(p => p.equipment_id === e.id);
+      const status = own.reduce((worst, p) => URGENCY.indexOf(p.status) > URGENCY.indexOf(worst) ? p.status : worst, 'ok');
+      return { ...e, status, parts: own };
+    }));
+  });
+
+  app.get('/api/orders', (req, res) => {
+    res.json(q.allOrders.all());
+  });
+
+  app.get('/api/audit', (req, res) => {
+    res.json(q.allAudit.all());
   });
 
   app.get('/api/requests/:id', (req, res) => {

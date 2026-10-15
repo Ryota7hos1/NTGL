@@ -4,10 +4,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS equipment (
+  id       TEXT PRIMARY KEY,                -- site tag, e.g. BS-A1
+  name     TEXT NOT NULL,
+  location TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS parts (
   id                INTEGER PRIMARY KEY,
   name              TEXT NOT NULL,
-  equipment_id      TEXT NOT NULL,
+  equipment_id      TEXT NOT NULL REFERENCES equipment(id),
   quantity          INTEGER NOT NULL,
   installed_on      TEXT NOT NULL,          -- ISO date
   service_life_days INTEGER NOT NULL,
@@ -71,6 +76,12 @@ function seed(db, today = new Date()) {
   const insert = db.prepare(`INSERT INTO parts (name, equipment_id, quantity, installed_on, service_life_days, spares_on_hand)
                              VALUES (?, ?, ?, ?, ?, ?)`);
   const history = db.prepare('INSERT INTO purchase_history (part_id, supplier, unit_price_gbp, quantity, purchased_on) VALUES (?, ?, ?, ?, ?)');
+  const equipment = db.prepare('INSERT INTO equipment (id, name, location) VALUES (?, ?, ?)');
+  equipment.run('UPS-A', 'UPS A (800 kVA)', 'Electrical room');
+  equipment.run('BS-A1', 'Battery string A1', 'Electrical room');
+  equipment.run('CRAH-3', 'CRAH unit 3', 'Data hall');
+  equipment.run('GEN-1', 'Generator 1', 'Generator yard');
+
   const part = (name, equipment, qty, life, daysLeft, spares, lastBought) => {
     const installed = ago(life - daysLeft);
     const { lastInsertRowid } = insert.run(name, equipment, qty, installed, life, spares);
@@ -80,6 +91,9 @@ function seed(db, today = new Date()) {
   part('VRLA jars BS-12', 'BS-A1', 40, 1825, 62, 0, ['Volta Critical Supply', 165]);
   part('Fan kit F-210', 'CRAH-3', 1, 1095, 425, 2, ['Northbank Power Services', 320]);
   part('Air filters G4', 'CRAH-3', 12, 180, 20, 12, ['Cellstock Direct', 18]);
+  part('DC capacitor bank', 'UPS-A', 6, 2555, 900, 0, ['Volta Critical Supply', 240]);
+  part('Starter batteries 24V', 'GEN-1', 2, 1095, 40, 0, ['Cellstock Direct', 95]);
+  part('Fuel filters', 'GEN-1', 4, 365, 200, 4, ['Northbank Power Services', 30]);
 }
 
 function open(file = path.join(__dirname, '..', 'data', 'ntgl.db')) {
@@ -92,7 +106,7 @@ function open(file = path.join(__dirname, '..', 'data', 'ntgl.db')) {
 }
 
 function reset(db) {
-  db.exec('DELETE FROM audit_log; DELETE FROM orders; DELETE FROM quotes; DELETE FROM supplier_requests; DELETE FROM purchase_history; DELETE FROM parts;');
+  db.exec('DELETE FROM audit_log; DELETE FROM orders; DELETE FROM quotes; DELETE FROM supplier_requests; DELETE FROM purchase_history; DELETE FROM parts; DELETE FROM equipment;');
   seed(db);
 }
 
