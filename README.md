@@ -65,9 +65,19 @@ The delivery-based triggers mean a slow supplier makes a part due sooner, so the
 | Planned | 10% | 45% | 45% |
 
 - For a failed part, the fastest delivery wins.
-- Otherwise, any delivery that lands before end of life scores the same. It only counts against a quote when it arrives far closer to end of life than the best alternative: more than a year closer, or with a tenth or less of that quote's margin.
+- Otherwise, the engine looks at each quote's margin: how many days before the needed-by date it arrives (the rated end of life, or the age the last unit failed at if that is why the part is due). Every on-time quote gets full marks for delivery. A late quote scores zero, and so does an on-time quote whose margin is drastically smaller than the best other quote's: more than 365 days smaller, or a tenth of it or less.
 - An exact OEM part beats a compatible alternative. The part's previous supplier always counts as an exact match, since it supplied that part before.
 - So between exact parts that all arrive on time, the cheapest wins.
+
+For example, take a due part needed by 2026-12-16 and three quotes for the exact part, requested on 2026-10-15:
+
+| Quote | Lead time | Arrives | Margin | Delivery score |
+|---|---|---|---|---|
+| A | 14 days | 2026-10-29 | 48 days | 1 |
+| B | 21 days | 2026-11-05 | 41 days | 1 |
+| C | 60 days | 2026-12-14 | 2 days | 0 |
+
+A and B both arrive in time, so delivery doesn't separate them, even though A is a week faster; price decides between them. C also arrives in time, but its 2 days of margin is a tenth or less of A's 48, so it scores as if it were late.
 
 The ranking only decides the order of the list. I kept the scores off the page because they cluttered the comparison, but every ranked quote carries its factor scores and plain-language reasons in the API, ready to show if engineers want them. The engine is deliberately simple for this demo.
 
